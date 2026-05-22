@@ -14,12 +14,10 @@ const Settings = {
 const API = {
   async _call(action, payload = {}) {
     if (!Settings.apiUrl) throw new Error('尚未設定 API URL');
-    // 用 text/plain 避免 CORS preflight (Apps Script 友善)
-    const res = await fetch(Settings.apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action, ...payload }),
-    });
+    // Apps Script GET 不會有 CORS preflight 問題
+    const body = JSON.stringify({ action, ...payload });
+    const url = Settings.apiUrl + '?payload=' + encodeURIComponent(body);
+    const res = await fetch(url, { redirect: 'follow' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
