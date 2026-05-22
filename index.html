@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="theme-color" content="#1a1a1a">
+<title>記帳本 · Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600;9..144,800&family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- 設定 Banner（未設定 API URL 時顯示） -->
+<div id="setup-banner" class="setup-banner hidden">
+  <div class="setup-banner__inner">
+    <span class="setup-banner__dot"></span>
+    <span>尚未連接後端。點此設定 Apps Script API URL</span>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="masthead__brand">
+    <div class="masthead__mark">¥</div>
+    <div class="masthead__title">
+      <h1>記帳本</h1>
+      <p>Personal Ledger · <span id="current-month-label">—</span></p>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab tab--active" data-tab="add" role="tab">記一筆</button>
+    <button class="tab" data-tab="list" role="tab">明細</button>
+    <button class="tab" data-tab="stats" role="tab">統計</button>
+    <button class="tab" data-tab="import" role="tab">匯入</button>
+    <button class="tab" data-tab="settings" role="tab">設定</button>
+  </nav>
+</header>
+
+<main class="stage">
+
+  <!-- ============ 記一筆 ============ -->
+  <section class="panel panel--active" data-panel="add">
+    <div class="panel__header">
+      <h2 class="panel__title">記一筆</h2>
+      <p class="panel__sub">記錄今天的花費或收入</p>
+    </div>
+
+    <form id="entry-form" class="entry-form">
+      <div class="type-toggle">
+        <button type="button" class="type-toggle__btn type-toggle__btn--active" data-type="expense">支出</button>
+        <button type="button" class="type-toggle__btn" data-type="income">收入</button>
+      </div>
+
+      <div class="amount-field">
+        <span class="amount-field__currency">NT$</span>
+        <input type="number" id="amount" inputmode="decimal" step="0.01" placeholder="0" required>
+      </div>
+
+      <div class="field-row">
+        <label class="field">
+          <span class="field__label">分類</span>
+          <select id="category" required>
+            <optgroup label="支出" id="expense-categories">
+              <option value="餐飲">餐飲</option>
+              <option value="交通">交通</option>
+              <option value="購物">購物</option>
+              <option value="娛樂">娛樂</option>
+              <option value="居家">居家</option>
+              <option value="醫療">醫療</option>
+              <option value="教育">教育</option>
+              <option value="其他">其他</option>
+            </optgroup>
+            <optgroup label="收入" id="income-categories" hidden>
+              <option value="薪資">薪資</option>
+              <option value="獎金">獎金</option>
+              <option value="投資">投資</option>
+              <option value="其他收入">其他收入</option>
+            </optgroup>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">帳戶</span>
+          <select id="account">
+            <option value="現金">現金</option>
+            <option value="信用卡">信用卡</option>
+            <option value="銀行">銀行</option>
+            <option value="電子支付">電子支付</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="field">
+        <span class="field__label">商家 / 備註</span>
+        <input type="text" id="note" placeholder="例：全家便利商店、午餐">
+      </label>
+
+      <label class="field">
+        <span class="field__label">日期</span>
+        <input type="date" id="date" required>
+      </label>
+
+      <button type="submit" class="submit-btn">
+        <span class="submit-btn__label">記下</span>
+        <span class="submit-btn__arrow">→</span>
+      </button>
+    </form>
+  </section>
+
+  <!-- ============ 明細 ============ -->
+  <section class="panel" data-panel="list">
+    <div class="panel__header">
+      <h2 class="panel__title">明細</h2>
+      <p class="panel__sub">本月 <span id="list-count">0</span> 筆交易</p>
+    </div>
+
+    <div class="summary-strip">
+      <div class="summary-card summary-card--income">
+        <span class="summary-card__label">收入</span>
+        <span class="summary-card__value" id="sum-income">0</span>
+      </div>
+      <div class="summary-card summary-card--expense">
+        <span class="summary-card__label">支出</span>
+        <span class="summary-card__value" id="sum-expense">0</span>
+      </div>
+      <div class="summary-card summary-card--balance">
+        <span class="summary-card__label">結餘</span>
+        <span class="summary-card__value" id="sum-balance">0</span>
+      </div>
+    </div>
+
+    <div id="entries-list" class="entries">
+      <div class="empty-state">
+        <p>還沒有記錄</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 統計 ============ -->
+  <section class="panel" data-panel="stats">
+    <div class="panel__header">
+      <h2 class="panel__title">統計</h2>
+      <p class="panel__sub">本月支出分類</p>
+    </div>
+
+    <div class="chart-wrap">
+      <canvas id="category-chart"></canvas>
+    </div>
+
+    <div id="category-breakdown" class="breakdown"></div>
+  </section>
+
+  <!-- ============ 匯入截圖 ============ -->
+  <section class="panel" data-panel="import">
+    <div class="panel__header">
+      <h2 class="panel__title">截圖匯入</h2>
+      <p class="panel__sub">上傳網銀刷卡記錄，自動辨識</p>
+    </div>
+
+    <div class="import-notice">
+      <p>此功能需在「設定」分頁填入 Claude API Key 才能使用。</p>
+      <p class="import-notice__detail">API key 只儲存在你的瀏覽器，不會上傳。</p>
+    </div>
+
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="file-input" accept="image/*" multiple hidden>
+      <div class="upload-zone__icon">⬆</div>
+      <div class="upload-zone__text">點此選擇截圖，或拖曳到此</div>
+      <div class="upload-zone__hint">支援 PNG、JPG，可一次多張</div>
+    </div>
+
+    <div id="parsing-status" class="parsing-status hidden"></div>
+
+    <div id="review-area" class="review-area hidden">
+      <h3 class="review-area__title">確認以下交易</h3>
+      <p class="review-area__sub">勾選要匯入的項目，可直接修改欄位</p>
+      <div id="review-list"></div>
+      <div class="review-actions">
+        <button class="btn btn--ghost" id="review-cancel">取消</button>
+        <button class="btn btn--primary" id="review-confirm">匯入勾選項目</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 設定 ============ -->
+  <section class="panel" data-panel="settings">
+    <div class="panel__header">
+      <h2 class="panel__title">設定</h2>
+      <p class="panel__sub">後端連線與 API 設定</p>
+    </div>
+
+    <label class="field">
+      <span class="field__label">Apps Script Web App URL</span>
+      <input type="text" id="api-url" placeholder="https://script.google.com/macros/s/...../exec">
+      <span class="field__hint">部署 Apps Script 後取得，按下方儲存</span>
+    </label>
+
+    <label class="field">
+      <span class="field__label">Claude API Key（選填，截圖匯入用）</span>
+      <input type="password" id="claude-key" placeholder="sk-ant-...">
+      <span class="field__hint">前往 console.anthropic.com 申請。僅存於瀏覽器</span>
+    </label>
+
+    <div class="settings-actions">
+      <button class="btn btn--primary" id="save-settings">儲存設定</button>
+      <button class="btn btn--ghost" id="test-connection">測試後端連線</button>
+    </div>
+
+    <div id="settings-status" class="settings-status"></div>
+
+    <div class="settings-info">
+      <h3>關於這個 App</h3>
+      <p>資料儲存在你自己的 Google Sheet，由你的 Apps Script 後端讀寫。設定步驟請見專案 README。</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- Toast 訊息 -->
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
