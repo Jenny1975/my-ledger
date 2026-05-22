@@ -428,43 +428,40 @@ async function parseImage(file) {
     "merchant": "商家名稱",
     "amount": 數字（不含貨幣符號、不含千分位）,
     "category": "猜測的分類，從這些選一個：餐飲、交通、購物、娛樂、居家、醫療、教育、其他",
-    "is_foreign": true/false (是否海外交易)
+    "is_foreign": true/false
   }
 ]
 
-注意事項：
-- 日期格式必須是 YYYY-MM-DD。如果截圖只有月日沒有年份，用今年 ${new Date().getFullYear()}
+注意：
+- 日期格式必須是 YYYY-MM-DD，如果只有月日沒有年份，用今年 ${new Date().getFullYear()}
 - 金額一律為正數
 - 如果完全看不到日期就用 "${today()}"
 - 如果沒有任何交易回傳空陣列 []`;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': Settings.claudeKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 4000,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: file.type, data: b64 } },
-          { type: 'text', text: prompt },
-        ]
-      }]
-    })
-  });
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${Settings.claudeKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inline_data: { mime_type: file.type, data: b64 } },
+            { text: prompt },
+          ]
+        }],
+        generationConfig: { temperature: 0.1 },
+      })
+    }
+  );
+
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Claude API ${res.status}: ${err.slice(0, 200)}`);
+    throw new Error(`Gemini API ${res.status}: ${err.slice(0, 200)}`);
   }
   const data = await res.json();
-  const text = data.content[0].text.trim();
-  // 去除可能的 markdown 包裹
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!text) throw new Error('Gemini 沒有回傳內容');
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   let items;
   try { items = JSON.parse(cleaned); } catch (e) {
