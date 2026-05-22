@@ -439,7 +439,7 @@ async function parseImage(file) {
 - 如果沒有任何交易回傳空陣列 []`;
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${Settings.claudeKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${Settings.claudeKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
