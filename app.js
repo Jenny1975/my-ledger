@@ -14,7 +14,6 @@ const Settings = {
 const API = {
   async _call(action, payload = {}) {
     if (!Settings.apiUrl) throw new Error('尚未設定 API URL');
-    // Apps Script GET 不會有 CORS preflight 問題
     const body = JSON.stringify({ action, ...payload });
     const url = Settings.apiUrl + '?payload=' + encodeURIComponent(body);
     const res = await fetch(url, { redirect: 'follow' });
@@ -31,13 +30,44 @@ const API = {
   deleteEntry(id)         { return this._call('delete', { id }); },
 };
 
+// ---------- 分類設定 (icon + 顏色) ----------
+const CATEGORY_META = {
+  // 支出
+  '餐飲':   { icon: '🍜', color: '#c8843c', bg: '#f5e3cc' },
+  '交通':   { icon: '🚗', color: '#3a6a8a', bg: '#d8e4ee' },
+  '購物':   { icon: '🛍️', color: '#a04880', bg: '#ecd6e2' },
+  '娛樂':   { icon: '🎬', color: '#7a5a8a', bg: '#e2d8e8' },
+  '居家':   { icon: '🏠', color: '#8a7040', bg: '#ebe0c8' },
+  '醫療':   { icon: '💊', color: '#a04030', bg: '#f0d4ce' },
+  '教育':   { icon: '📚', color: '#5a7a3a', bg: '#dee5d2' },
+  '其他':   { icon: '📌', color: '#5a5a5a', bg: '#d8d8d8' },
+  // 收入
+  '薪資':     { icon: '💰', color: '#5a7a3a', bg: '#dee5d2' },
+  '獎金':     { icon: '🎁', color: '#c8843c', bg: '#f5e3cc' },
+  '投資':     { icon: '📈', color: '#3a6a8a', bg: '#d8e4ee' },
+  '回饋':     { icon: '💳', color: '#a04880', bg: '#ecd6e2' },
+  '退款':     { icon: '↩️', color: '#7a5a8a', bg: '#e2d8e8' },
+  '其他收入': { icon: '💵', color: '#5a5a5a', bg: '#d8d8d8' },
+};
+
+const EXPENSE_CATEGORIES = ['餐飲','交通','購物','娛樂','居家','醫療','教育','其他'];
+const INCOME_CATEGORIES = ['薪資','獎金','投資','回饋','退款','其他收入'];
+
+function getCategoryMeta(cat) {
+  return CATEGORY_META[cat] || { icon: '📌', color: '#5a5a5a', bg: '#d8d8d8' };
+}
+
 // ---------- State ----------
 const State = {
   entries: [],
-  currentMonth: null,
+  viewMonth: null,        // 明細頁正在看的月份 'YYYY-MM'
+  statsMonth: null,       // 統計頁正在看的月份
+  subtab: 'all',          // 明細子分頁: all / expense / income
   formType: 'expense',
-  parsedItems: [], // 待確認的截圖解析結果
+  parsedItems: [],        // 待確認的截圖解析結果
   chart: null,
+  // 快取所有月份的資料，避免反覆呼叫 API
+  cache: {},              // { 'YYYY-MM': [entries] }
 };
 
 // ---------- Utils ----------
@@ -51,6 +81,18 @@ function ym(d = new Date()) {
 function today() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function monthLabel(ymStr) {
+  if (!ymStr) return '—';
+  const [y, m] = ymStr.split('-');
+  return `${y} / ${m}`;
+}
+
+function shiftMonth(ymStr, delta) {
+  const [y, m] = ymStr.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return ym(d);
 }
 
 function fmtMoney(n) {
@@ -71,6 +113,19 @@ function toast(msg, isErr = false) {
   toast._timer = setTimeout(() => t.classList.remove('toast--show'), 2400);
 }
 
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+// 用 日期+金額+備註/商家 當交易指紋，用於去重
+function entryFingerprint(e) {
+  const note = String(e.note || e.merchant || '').trim();
+  const amt = Math.round(Number(e.amount) || 0);
+  return `${e.date}|${amt}|${note}`;
+}
+
 // ---------- Tab 切換 ----------
 function initTabs() {
   $$('.tab').forEach(btn => {
@@ -78,14 +133,13 @@ function initTabs() {
       const target = btn.dataset.tab;
       $$('.tab').forEach(t => t.classList.toggle('tab--active', t === btn));
       $$('.panel').forEach(p => p.classList.toggle('panel--active', p.dataset.panel === target));
-      if (target === 'list' || target === 'stats') refreshEntries();
+      if (target === 'list' || target === 'stats') refreshCurrentView();
     });
   });
 }
 
 // ---------- 新增表單 ----------
 function initForm() {
-  // 預填日期
   $('#date').value = today();
 
   // 收入/支出切換
@@ -94,11 +148,7 @@ function initForm() {
       const type = btn.dataset.type;
       State.formType = type;
       $$('.type-toggle__btn').forEach(b => b.classList.toggle('type-toggle__btn--active', b === btn));
-      // 切換分類選項
-      $('#expense-categories').hidden = (type !== 'expense');
-      $('#income-categories').hidden = (type !== 'income');
-      const sel = $('#category');
-      sel.value = type === 'expense' ? '餐飲' : '薪資';
+      rebuildCategoryOptions();
     });
   });
 
@@ -123,66 +173,146 @@ function initForm() {
     try {
       await API.addEntry(entry);
       toast('已記錄');
-      // 重置部分欄位
       $('#amount').value = '';
       $('#note').value = '';
-      // 如果在明細頁開著，重新整理
-      refreshEntries();
+      // 清除快取觸發重新載入
+      delete State.cache[entry.date.slice(0, 7)];
+      refreshCurrentView();
     } catch (err) {
       toast('記錄失敗：' + err.message, true);
     }
   });
+
+  rebuildCategoryOptions();
 }
 
-// ---------- 載入並渲染明細 ----------
-async function refreshEntries() {
-  if (!Settings.apiUrl) return;
-  try {
-    const month = ym();
-    State.currentMonth = month;
-    const data = await API.listEntries(month);
-    State.entries = data.entries || [];
-    renderEntries();
-    renderSummary();
-    renderStats();
-  } catch (err) {
-    console.error(err);
+function rebuildCategoryOptions() {
+  const sel = $('#category');
+  const cats = State.formType === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+  sel.innerHTML = cats.map(c => {
+    const m = getCategoryMeta(c);
+    return `<option value="${c}">${m.icon} ${c}</option>`;
+  }).join('');
+}
+
+// ---------- 月份切換 ----------
+function initMonthNav() {
+  $('#month-prev').addEventListener('click', () => changeMonth('list', -1));
+  $('#month-next').addEventListener('click', () => changeMonth('list', 1));
+  $('#stats-month-prev').addEventListener('click', () => changeMonth('stats', -1));
+  $('#stats-month-next').addEventListener('click', () => changeMonth('stats', 1));
+}
+
+function changeMonth(which, delta) {
+  if (which === 'list') {
+    State.viewMonth = shiftMonth(State.viewMonth, delta);
+    refreshList();
+  } else {
+    State.statsMonth = shiftMonth(State.statsMonth, delta);
+    refreshStats();
   }
 }
 
+function updateMonthLabels() {
+  $('#month-label').textContent = monthLabel(State.viewMonth);
+  $('#stats-month-label').textContent = monthLabel(State.statsMonth);
+  // 未來月份按鈕禁用
+  const cur = ym();
+  $('#month-next').disabled = (State.viewMonth >= cur);
+  $('#stats-month-next').disabled = (State.statsMonth >= cur);
+}
+
+// ---------- 子分頁 ----------
+function initSubtabs() {
+  $$('.subtab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      State.subtab = btn.dataset.subtab;
+      $$('.subtab').forEach(b => b.classList.toggle('subtab--active', b === btn));
+      renderEntries();
+    });
+  });
+}
+
+// ---------- 載入資料 ----------
+async function loadMonth(month, force = false) {
+  if (!Settings.apiUrl) return [];
+  if (!force && State.cache[month]) return State.cache[month];
+  try {
+    const data = await API.listEntries(month);
+    State.cache[month] = data.entries || [];
+    return State.cache[month];
+  } catch (err) {
+    console.error('Load failed:', err);
+    return [];
+  }
+}
+
+// 刷新當前看到的分頁
+async function refreshCurrentView() {
+  const activePanel = document.querySelector('.panel--active')?.dataset.panel;
+  if (activePanel === 'list') await refreshList();
+  else if (activePanel === 'stats') await refreshStats();
+}
+
+async function refreshList() {
+  if (!Settings.apiUrl) return;
+  State.entries = await loadMonth(State.viewMonth);
+  renderEntries();
+  renderSummary();
+  updateMonthLabels();
+}
+
+async function refreshStats() {
+  if (!Settings.apiUrl) return;
+  const entries = await loadMonth(State.statsMonth);
+  renderStats(entries);
+  updateMonthLabels();
+}
+
+// ---------- 渲染明細 ----------
 function renderEntries() {
   const list = $('#entries-list');
-  if (!State.entries.length) {
-    list.innerHTML = '<div class="empty-state"><p>本月還沒有記錄</p></div>';
-    $('#list-count').textContent = '0';
+  let filtered = State.entries;
+  if (State.subtab === 'expense') filtered = filtered.filter(e => e.type === 'expense');
+  else if (State.subtab === 'income') filtered = filtered.filter(e => e.type === 'income');
+
+  $('#list-count').textContent = filtered.length;
+
+  if (!filtered.length) {
+    const msg = State.subtab === 'income' ? '本月沒有收入記錄'
+              : State.subtab === 'expense' ? '本月沒有支出記錄'
+              : '本月還沒有記錄';
+    list.innerHTML = `<div class="empty-state"><p>${msg}</p></div>`;
     return;
   }
-  // 日期反向排序
-  const sorted = [...State.entries].sort((a, b) =>
+
+  const sorted = [...filtered].sort((a, b) =>
     (b.date + b.createdAt).localeCompare(a.date + a.createdAt));
 
   const monthShort = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
   list.innerHTML = sorted.map(e => {
-    const [y, m, d] = e.date.split('-');
+    const parts = String(e.date).split('-');
+    const m = parseInt(parts[1], 10);
+    const d = parseInt(parts[2], 10);
     const sign = e.type === 'income' ? '+' : '−';
+    const meta = getCategoryMeta(e.category);
     return `
       <div class="entry" data-id="${e.id}">
         <div class="entry__date">
-          <span class="entry__date-day">${parseInt(d, 10)}</span>
-          <span class="entry__date-mon">${monthShort[parseInt(m, 10) - 1]}</span>
+          <span class="entry__date-day">${d}</span>
+          <span class="entry__date-mon">${monthShort[m - 1]}</span>
         </div>
         <div class="entry__detail">
-          <div class="entry__category">${escapeHtml(e.category)}<span class="entry__meta">${escapeHtml(e.account || '')}</span></div>
+          <div class="entry__category">
+            <span style="margin-right:4px">${meta.icon}</span>${escapeHtml(e.category)}<span class="entry__meta">${escapeHtml(e.account || '')}</span>
+          </div>
           <div class="entry__note">${escapeHtml(e.note || '—')}</div>
         </div>
         <div class="entry__amount entry__amount--${e.type}">${sign}${fmtMoney(e.amount)}</div>
       </div>`;
   }).join('');
 
-  $('#list-count').textContent = State.entries.length;
-
-  // 點擊編輯
   $$('.entry').forEach(el => {
     el.addEventListener('click', () => editEntry(el.dataset.id));
   });
@@ -199,48 +329,106 @@ function renderSummary() {
   $('#sum-balance').textContent = fmtMoney(income - expense);
 }
 
-function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[c]);
-}
-
-// ---------- 編輯/刪除 ----------
-async function editEntry(id) {
+// ---------- 編輯/刪除 (Modal 版) ----------
+function editEntry(id) {
   const e = State.entries.find(x => x.id === id);
   if (!e) return;
 
-  const action = prompt(
-    `編輯交易：\n${e.date}  ${e.category}  ${fmtMoney(e.amount)}\n${e.note || ''}\n\n輸入：\n  1 = 刪除\n  2 = 修改金額\n  3 = 修改備註\n  取消請按 Cancel`,
-    ''
-  );
-  if (!action) return;
+  const cats = e.type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+  const catOptions = cats.map(c => {
+    const m = getCategoryMeta(c);
+    return `<option value="${c}" ${c === e.category ? 'selected' : ''}>${m.icon} ${c}</option>`;
+  }).join('');
 
-  try {
-    if (action === '1') {
-      if (!confirm('確定刪除？')) return;
+  const modalHtml = `
+    <div class="modal-backdrop" id="edit-modal-backdrop">
+      <div class="modal">
+        <div class="modal__title">編輯交易</div>
+        <div class="modal__sub">${e.type === 'expense' ? '支出' : '收入'} · ${escapeHtml(e.account || '')}</div>
+
+        <label class="field">
+          <span class="field__label">日期</span>
+          <input type="date" id="edit-date" value="${e.date}">
+        </label>
+
+        <label class="field">
+          <span class="field__label">金額</span>
+          <input type="number" id="edit-amount" value="${e.amount}" step="0.01">
+        </label>
+
+        <label class="field">
+          <span class="field__label">分類</span>
+          <select id="edit-category">${catOptions}</select>
+        </label>
+
+        <label class="field">
+          <span class="field__label">商家 / 備註</span>
+          <input type="text" id="edit-note" value="${escapeHtml(e.note || '')}">
+        </label>
+
+        <div class="modal__actions">
+          <button class="btn btn--ghost" id="edit-cancel">取消</button>
+          <button class="btn btn--danger" id="edit-delete">刪除</button>
+          <button class="btn btn--primary" id="edit-save">儲存</button>
+        </div>
+      </div>
+    </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  const backdrop = $('#edit-modal-backdrop');
+  // 觸發過場動畫
+  requestAnimationFrame(() => backdrop.classList.add('modal-backdrop--show'));
+
+  const close = () => {
+    backdrop.classList.remove('modal-backdrop--show');
+    setTimeout(() => backdrop.remove(), 250);
+  };
+
+  backdrop.addEventListener('click', (ev) => {
+    if (ev.target === backdrop) close();
+  });
+  $('#edit-cancel').addEventListener('click', close);
+
+  $('#edit-delete').addEventListener('click', async () => {
+    if (!confirm('確定刪除這筆交易？')) return;
+    try {
       await API.deleteEntry(id);
+      delete State.cache[State.viewMonth];
       toast('已刪除');
-    } else if (action === '2') {
-      const n = prompt('新金額', String(e.amount));
-      if (!n) return;
-      await API.updateEntry(id, { amount: Number(n) });
+      close();
+      refreshCurrentView();
+    } catch (err) {
+      toast('刪除失敗：' + err.message, true);
+    }
+  });
+
+  $('#edit-save').addEventListener('click', async () => {
+    const patch = {
+      date: $('#edit-date').value,
+      amount: Number($('#edit-amount').value),
+      category: $('#edit-category').value,
+      note: $('#edit-note').value.trim(),
+    };
+    if (!patch.amount || patch.amount <= 0) {
+      toast('金額不正確', true); return;
+    }
+    try {
+      await API.updateEntry(id, patch);
+      // 日期可能跨月，把新舊月份的快取都清掉
+      delete State.cache[e.date.slice(0, 7)];
+      delete State.cache[patch.date.slice(0, 7)];
       toast('已更新');
-    } else if (action === '3') {
-      const n = prompt('新備註', e.note || '');
-      if (n === null) return;
-      await API.updateEntry(id, { note: n });
-      toast('已更新');
-    } else return;
-    await refreshEntries();
-  } catch (err) {
-    toast('操作失敗：' + err.message, true);
-  }
+      close();
+      refreshCurrentView();
+    } catch (err) {
+      toast('更新失敗：' + err.message, true);
+    }
+  });
 }
 
 // ---------- 統計圖表 ----------
-function renderStats() {
-  const expenses = State.entries.filter(e => e.type === 'expense');
+function renderStats(entries) {
+  const expenses = entries.filter(e => e.type === 'expense');
   const byCategory = {};
   for (const e of expenses) {
     byCategory[e.category] = (byCategory[e.category] || 0) + Number(e.amount);
@@ -249,14 +437,13 @@ function renderStats() {
   const vals = cats.map(c => byCategory[c]);
   const total = vals.reduce((s, v) => s + v, 0);
 
-  // 復古色票
-  const palette = ['#c8843c', '#a04030', '#5a7a3a', '#3a6a8a', '#7a5a8a', '#8a7040', '#5a5a5a', '#a06848'];
+  const colors = cats.map(c => getCategoryMeta(c).color);
 
-  // 圖表
   const ctx = $('#category-chart').getContext('2d');
   if (State.chart) State.chart.destroy();
   if (!cats.length) {
-    $('#category-breakdown').innerHTML = '<div class="empty-state"><p>本月還沒有支出記錄</p></div>';
+    $('#category-breakdown').innerHTML = '<div class="empty-state"><p>這個月還沒有支出記錄</p></div>';
+    State.chart = null;
     return;
   }
   State.chart = new Chart(ctx, {
@@ -265,7 +452,7 @@ function renderStats() {
       labels: cats,
       datasets: [{
         data: vals,
-        backgroundColor: cats.map((_, i) => palette[i % palette.length]),
+        backgroundColor: colors,
         borderWidth: 2,
         borderColor: '#faf5ea',
       }]
@@ -293,16 +480,17 @@ function renderStats() {
     }
   });
 
-  // breakdown
   $('#category-breakdown').innerHTML = cats.map((c, i) => {
     const v = byCategory[c];
     const pct = ((v / total) * 100).toFixed(1);
+    const color = colors[i];
+    const meta = getCategoryMeta(c);
     return `
       <div class="breakdown-item">
-        <span class="breakdown-item__swatch" style="background:${palette[i % palette.length]}"></span>
+        <span class="breakdown-item__swatch" style="background:${color}"></span>
         <div>
-          <div class="breakdown-item__name">${escapeHtml(c)} <span style="color:#8a7f6e;font-size:12px;">${pct}%</span></div>
-          <div class="breakdown-item__bar"><div class="breakdown-item__fill" style="width:${pct}%;background:${palette[i % palette.length]}"></div></div>
+          <div class="breakdown-item__name">${meta.icon} ${escapeHtml(c)} <span style="color:#8a7f6e;font-size:12px;">${pct}%</span></div>
+          <div class="breakdown-item__bar"><div class="breakdown-item__fill" style="width:${pct}%;background:${color}"></div></div>
         </div>
         <span class="breakdown-item__amount">${fmtMoney(v)}</span>
       </div>`;
@@ -319,7 +507,8 @@ function initSettings() {
     Settings.claudeKey = $('#claude-key').value.trim();
     setStatus('已儲存', false);
     updateSetupBanner();
-    refreshEntries();
+    State.cache = {}; // 清快取
+    refreshCurrentView();
   });
 
   $('#test-connection').addEventListener('click', async () => {
@@ -374,7 +563,7 @@ function initImport() {
 
 async function handleFiles(fileList) {
   if (!Settings.claudeKey) {
-    toast('請先在「設定」填入 Claude API Key', true);
+    toast('請先在「設定」填入 Gemini API Key', true);
     return;
   }
   if (!Settings.apiUrl) {
@@ -400,6 +589,32 @@ async function handleFiles(fileList) {
       toast('沒有辨識出交易', true);
       return;
     }
+
+    // 自動去重：先載入所有涉及月份的既有資料
+    status.classList.remove('hidden');
+    status.textContent = '比對是否已存在...';
+    const monthsNeeded = new Set();
+    allItems.forEach(it => {
+      if (it.date) monthsNeeded.add(String(it.date).slice(0, 7));
+    });
+    const existingFingerprints = new Set();
+    for (const month of monthsNeeded) {
+      const entries = await loadMonth(month, true);
+      entries.forEach(e => existingFingerprints.add(entryFingerprint(e)));
+    }
+    status.classList.add('hidden');
+
+    // 標記每筆是否為重複
+    allItems.forEach(it => {
+      const fp = entryFingerprint(it);
+      it._isDuplicate = existingFingerprints.has(fp);
+      // 預設 type：如果 AI 沒給就猜 expense
+      if (!it.type) {
+        // 金額為負或 AI 標示為 income 才當收入
+        it.type = it.is_income ? 'income' : 'expense';
+      }
+    });
+
     State.parsedItems = allItems;
     renderReview();
   } catch (err) {
@@ -425,12 +640,21 @@ async function parseImage(file) {
 [
   {
     "date": "YYYY-MM-DD",
-    "merchant": "商家名稱",
-    "amount": 數字（不含貨幣符號、不含千分位）,
-    "category": "猜測的分類，從這些選一個：餐飲、交通、購物、娛樂、居家、醫療、教育、其他",
-    "is_foreign": true/false
+    "merchant": "商家名稱或交易描述",
+    "amount": 數字（正數，不含貨幣符號、不含千分位）,
+    "type": "expense" 或 "income",
+    "category": "從下方對應類型的清單裡挑一個"
   }
 ]
+
+判斷 type 的方法：
+- 一般刷卡消費 → expense
+- 信用卡回饋金、現金回饋、紅利點數兌換現金 → income, category 用「回饋」
+- 退款、退刷 → income, category 用「退款」
+- 薪資、利息、股利 → income
+
+支出分類選一個：餐飲、交通、購物、娛樂、居家、醫療、教育、其他
+收入分類選一個：薪資、獎金、投資、回饋、退款、其他收入
 
 注意：
 - 日期格式必須是 YYYY-MM-DD，如果只有月日沒有年份，用今年 ${new Date().getFullYear()}
@@ -439,7 +663,7 @@ async function parseImage(file) {
 - 如果沒有任何交易回傳空陣列 []`;
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${Settings.claudeKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${Settings.claudeKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -474,20 +698,55 @@ async function parseImage(file) {
 function renderReview() {
   const area = $('#review-area');
   area.classList.remove('hidden');
-  const categories = ['餐飲', '交通', '購物', '娛樂', '居家', '醫療', '教育', '其他'];
-  $('#review-list').innerHTML = State.parsedItems.map((it, i) => `
-    <div class="review-item">
-      <input type="checkbox" class="review-item__check" data-i="${i}" checked>
-      <div class="review-item__fields">
-        <input type="date" data-i="${i}" data-field="date" value="${it.date || today()}">
-        <input type="text" data-i="${i}" data-field="merchant" value="${escapeHtml(it.merchant || '')}" placeholder="商家">
-        <input type="number" data-i="${i}" data-field="amount" value="${it.amount || 0}" step="0.01">
-        <select data-i="${i}" data-field="category">
-          ${categories.map(c => `<option ${c === it.category ? 'selected' : ''}>${c}</option>`).join('')}
-        </select>
-      </div>
-    </div>
-  `).join('');
+
+  // 排序：未重複的在前，重複的在後
+  State.parsedItems.sort((a, b) => (a._isDuplicate ? 1 : 0) - (b._isDuplicate ? 1 : 0));
+
+  const dupCount = State.parsedItems.filter(it => it._isDuplicate).length;
+  const newCount = State.parsedItems.length - dupCount;
+
+  let summaryHtml = '';
+  if (dupCount > 0) {
+    summaryHtml = `<p style="font-size:13px;color:var(--muted);margin-bottom:12px;">辨識出 ${State.parsedItems.length} 筆，其中 <strong style="color:var(--ink)">${newCount} 筆是新交易</strong>，${dupCount} 筆已經存在（預設不勾選）。</p>`;
+  } else {
+    summaryHtml = `<p style="font-size:13px;color:var(--muted);margin-bottom:12px;">辨識出 ${State.parsedItems.length} 筆新交易。</p>`;
+  }
+
+  const itemsHtml = State.parsedItems.map((it, i) => {
+    const cat = it.category || (it.type === 'income' ? '其他收入' : '其他');
+    const meta = getCategoryMeta(cat);
+    const cats = it.type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    const catOptions = cats.map(c => {
+      const m = getCategoryMeta(c);
+      return `<option value="${c}" ${c === cat ? 'selected' : ''}>${m.icon} ${c}</option>`;
+    }).join('');
+
+    const checked = !it._isDuplicate ? 'checked' : '';
+    const dupClass = it._isDuplicate ? 'review-item--duplicate' : '';
+    const dupTag = it._isDuplicate ? '<span class="review-item__dup-tag">已存在</span>' : '';
+    const typeBadge = it.type === 'income'
+      ? '<span class="review-item__type-badge review-item__type-badge--income">收</span>'
+      : '<span class="review-item__type-badge">支</span>';
+
+    return `
+      <div class="review-item ${dupClass}" style="--cat-color:${meta.color};--cat-bg:${meta.bg};">
+        <input type="checkbox" class="review-item__check" data-i="${i}" ${checked}>
+        <div class="review-item__icon">${meta.icon}</div>
+        <div class="review-item__fields">
+          <div class="review-item__type-row">
+            <button type="button" data-i="${i}" data-type="expense" class="${it.type !== 'income' ? 'active' : ''}">支出</button>
+            <button type="button" data-i="${i}" data-type="income" class="${it.type === 'income' ? 'active' : ''}">收入</button>
+            ${typeBadge} ${dupTag}
+          </div>
+          <input type="date" data-i="${i}" data-field="date" value="${it.date || today()}">
+          <input type="text" data-i="${i}" data-field="merchant" value="${escapeHtml(it.merchant || '')}" placeholder="商家">
+          <input type="number" data-i="${i}" data-field="amount" value="${it.amount || 0}" step="0.01">
+          <select data-i="${i}" data-field="category" style="grid-column:1/-1;">${catOptions}</select>
+        </div>
+      </div>`;
+  }).join('');
+
+  $('#review-list').innerHTML = summaryHtml + itemsHtml;
 
   // 監聽欄位修改
   $('#review-list').addEventListener('input', (e) => {
@@ -495,6 +754,22 @@ function renderReview() {
     const field = e.target.dataset.field;
     if (i !== undefined && field) {
       State.parsedItems[i][field] = e.target.value;
+    }
+  });
+
+  // 監聽 type 切換
+  $('#review-list').addEventListener('click', (e) => {
+    if (e.target.tagName === 'BUTTON' && e.target.dataset.type) {
+      const i = parseInt(e.target.dataset.i, 10);
+      const newType = e.target.dataset.type;
+      State.parsedItems[i].type = newType;
+      // 預設分類
+      if (newType === 'income' && !INCOME_CATEGORIES.includes(State.parsedItems[i].category)) {
+        State.parsedItems[i].category = '回饋';
+      } else if (newType === 'expense' && !EXPENSE_CATEGORIES.includes(State.parsedItems[i].category)) {
+        State.parsedItems[i].category = '其他';
+      }
+      renderReview(); // 重繪這個項目
     }
   });
 }
@@ -508,9 +783,9 @@ async function confirmImport() {
       toImport.push({
         id: uid(),
         date: it.date,
-        type: 'expense',
+        type: it.type || 'expense',
         amount: Number(it.amount),
-        category: it.category,
+        category: it.category || (it.type === 'income' ? '其他收入' : '其他'),
         account: '信用卡',
         note: it.merchant,
         createdAt: new Date().toISOString(),
@@ -526,7 +801,9 @@ async function confirmImport() {
     toast(`已匯入 ${toImport.length} 筆`);
     $('#review-area').classList.add('hidden');
     State.parsedItems = [];
-    refreshEntries();
+    // 清除所有涉及月份的快取
+    toImport.forEach(e => delete State.cache[e.date.slice(0, 7)]);
+    refreshCurrentView();
   } catch (err) {
     toast('匯入失敗：' + err.message, true);
   }
@@ -534,17 +811,23 @@ async function confirmImport() {
 
 // ---------- 啟動 ----------
 function init() {
+  // 初始月份
+  State.viewMonth = ym();
+  State.statsMonth = ym();
+
   initTabs();
   initForm();
+  initMonthNav();
+  initSubtabs();
   initSettings();
   initImport();
   updateSetupBanner();
-  // 月份顯示
+
   const months = ['一','二','三','四','五','六','七','八','九','十','十一','十二'];
   const d = new Date();
   $('#current-month-label').textContent = `${d.getFullYear()} 年 ${months[d.getMonth()]}月`;
-  // 載入資料
-  refreshEntries();
+
+  refreshList();
 }
 
 document.addEventListener('DOMContentLoaded', init);
