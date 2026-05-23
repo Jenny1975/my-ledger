@@ -62,23 +62,7 @@
         <label class="field">
           <span class="field__label">分類</span>
           <select id="category" required>
-            <optgroup label="支出" id="expense-categories">
-              <option value="餐飲">餐飲</option>
-              <option value="交通">交通</option>
-              <option value="購物">購物</option>
-              <option value="娛樂">娛樂</option>
-              <option value="居家">居家</option>
-              <option value="醫療">醫療</option>
-              <option value="教育">教育</option>
-              <option value="其他">其他</option>
-            </optgroup>
-            <optgroup label="收入" id="income-categories" hidden>
-              <option value="薪資">薪資</option>
-              <option value="獎金">獎金</option>
-              <option value="投資">投資</option>
-              <option value="其他收入">其他收入</option>
-            </optgroup>
-          </select>
+          <select id="category" required></select>
         </label>
 
         <label class="field">
@@ -111,9 +95,16 @@
 
   <!-- ============ 明細 ============ -->
   <section class="panel" data-panel="list">
-    <div class="panel__header">
-      <h2 class="panel__title">明細</h2>
-      <p class="panel__sub">本月 <span id="list-count">0</span> 筆交易</p>
+    <div class="panel__header panel__header--with-nav">
+      <div>
+        <h2 class="panel__title">明細</h2>
+        <p class="panel__sub"><span id="list-count">0</span> 筆交易</p>
+      </div>
+      <div class="month-nav">
+        <button class="month-nav__btn" id="month-prev" aria-label="上個月">‹</button>
+        <span class="month-nav__label" id="month-label">—</span>
+        <button class="month-nav__btn" id="month-next" aria-label="下個月">›</button>
+      </div>
     </div>
 
     <div class="summary-strip">
@@ -131,6 +122,12 @@
       </div>
     </div>
 
+    <div class="subtabs">
+      <button class="subtab subtab--active" data-subtab="all">全部</button>
+      <button class="subtab" data-subtab="expense">支出</button>
+      <button class="subtab" data-subtab="income">收入</button>
+    </div>
+
     <div id="entries-list" class="entries">
       <div class="empty-state">
         <p>還沒有記錄</p>
@@ -140,9 +137,16 @@
 
   <!-- ============ 統計 ============ -->
   <section class="panel" data-panel="stats">
-    <div class="panel__header">
-      <h2 class="panel__title">統計</h2>
-      <p class="panel__sub">本月支出分類</p>
+    <div class="panel__header panel__header--with-nav">
+      <div>
+        <h2 class="panel__title">統計</h2>
+        <p class="panel__sub">支出分類</p>
+      </div>
+      <div class="month-nav">
+        <button class="month-nav__btn" id="stats-month-prev" aria-label="上個月">‹</button>
+        <span class="month-nav__label" id="stats-month-label">—</span>
+        <button class="month-nav__btn" id="stats-month-next" aria-label="下個月">›</button>
+      </div>
     </div>
 
     <div class="chart-wrap">
