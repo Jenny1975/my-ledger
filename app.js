@@ -113,6 +113,47 @@ function toast(msg, isErr = false) {
   toast._timer = setTimeout(() => t.classList.remove('toast--show'), 2400);
 }
 
+// 顯示完整錯誤訊息的對話框 (不會自動消失，可以複製)
+function showError(title, detail) {
+  // 移除已存在的
+  document.querySelector('#error-modal-backdrop')?.remove();
+
+  const html = `
+    <div class="modal-backdrop" id="error-modal-backdrop">
+      <div class="modal">
+        <div class="modal__title">${escapeHtml(title)}</div>
+        <div class="modal__sub">錯誤詳細內容</div>
+        <pre class="error-detail">${escapeHtml(detail)}</pre>
+        <div class="modal__actions">
+          <button class="btn btn--ghost" id="error-copy">複製錯誤訊息</button>
+          <button class="btn btn--primary" id="error-close">關閉</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  const backdrop = $('#error-modal-backdrop');
+  requestAnimationFrame(() => backdrop.classList.add('modal-backdrop--show'));
+
+  const close = () => {
+    backdrop.classList.remove('modal-backdrop--show');
+    setTimeout(() => backdrop.remove(), 250);
+  };
+
+  $('#error-close').addEventListener('click', close);
+  backdrop.addEventListener('click', (ev) => {
+    if (ev.target === backdrop) close();
+  });
+  $('#error-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(`${title}\n\n${detail}`);
+      $('#error-copy').textContent = '已複製';
+      setTimeout(() => { const b = $('#error-copy'); if (b) b.textContent = '複製錯誤訊息'; }, 1500);
+    } catch (e) {
+      $('#error-copy').textContent = '複製失敗';
+    }
+  });
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -179,7 +220,7 @@ function initForm() {
       delete State.cache[entry.date.slice(0, 7)];
       refreshCurrentView();
     } catch (err) {
-      toast('記錄失敗：' + err.message, true);
+      showError('記錄失敗', String(err.message || err));
     }
   });
 
@@ -398,7 +439,7 @@ function editEntry(id) {
       close();
       refreshCurrentView();
     } catch (err) {
-      toast('刪除失敗：' + err.message, true);
+      showError('刪除失敗', String(err.message || err));
     }
   });
 
@@ -414,14 +455,13 @@ function editEntry(id) {
     }
     try {
       await API.updateEntry(id, patch);
-      // 日期可能跨月，把新舊月份的快取都清掉
       delete State.cache[e.date.slice(0, 7)];
       delete State.cache[patch.date.slice(0, 7)];
       toast('已更新');
       close();
       refreshCurrentView();
     } catch (err) {
-      toast('更新失敗：' + err.message, true);
+      showError('更新失敗', String(err.message || err));
     }
   });
 }
@@ -517,7 +557,8 @@ function initSettings() {
       const r = await API.ping();
       setStatus(`連線成功 · ${r.sheet || ''}`, false);
     } catch (e) {
-      setStatus('連線失敗：' + e.message, true);
+      setStatus('連線失敗', true);
+      showError('連線失敗', String(e.message || e));
     }
   });
 
@@ -581,6 +622,8 @@ async function handleFiles(fileList) {
     const allItems = [];
     for (let i = 0; i < files.length; i++) {
       status.textContent = `解析第 ${i + 1} / ${files.length} 張…`;
+      // 從第二張開始，先等 4 秒避免打到 Gemini 免費版每分鐘 15 次的限制
+      if (i > 0) await new Promise(r => setTimeout(r, 4000));
       const items = await parseImage(files[i]);
       allItems.push(...items);
     }
@@ -619,7 +662,7 @@ async function handleFiles(fileList) {
     renderReview();
   } catch (err) {
     status.classList.add('hidden');
-    toast('解析失敗：' + err.message, true);
+    showError('截圖解析失敗', String(err.message || err));
   }
 }
 
@@ -805,7 +848,7 @@ async function confirmImport() {
     toImport.forEach(e => delete State.cache[e.date.slice(0, 7)]);
     refreshCurrentView();
   } catch (err) {
-    toast('匯入失敗：' + err.message, true);
+    showError('匯入失敗', String(err.message || err));
   }
 }
 
