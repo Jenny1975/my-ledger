@@ -896,6 +896,21 @@ body {
 }
 .modal__actions .btn--danger:hover { opacity: 0.9; }
 
+.error-detail {
+  background: var(--ink);
+  color: var(--paper-bright);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 14px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+}
+
 /* ============ Mobile ============ */
 @media (max-width: 600px) {
   .masthead { padding: 20px 16px 0; }
